@@ -1,4 +1,5 @@
 pom.xml
 *jar
+*.swp
 lib
 classes
