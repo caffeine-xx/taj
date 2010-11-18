@@ -4,18 +4,6 @@
   (:use [clojure.string  :only [split trim]])
   (:import java.net.Socket))
 
-;(defprotocol quote-stream
-;  "Protocol for quote streams"
-;  (quotes-subscribe   [qs symbol quotetype callback])
-;  (quotes-unsubscribe [qs symbol quotetype])
-;  (quotes-fundamental [qs symbol quotetype])
-;  (quotes-ping        [qs])
-;  (quotes-close       [qs])
-;  (quotes-open?       [qs]))
-;
-;(defrecord 
-;  mbt-quote-stream [socket subscriptions])
-
 ;; MBT Interface
 (declare mbt-connect)
 (declare mbt-subscribe)
@@ -56,8 +44,7 @@
   ^{:doc "Splits a string 
           A|B=1;C=2 into [A {B 1 C 2}]
           A         into [A nil]"
-    :test (fn [] (assert (= (split-msg "A|B=1;C=2\n") ["A" {"B" "1" "C" "2"}]))
-                 (assert (= (split-msg "A") ["A" nil])))}
+    :test }
   (if (> (count s) 2)
     (let [[head body] (map trim (split s #"\|"))
            data (apply hash-map 
@@ -68,17 +55,18 @@
 
 (defn mbt-write [mbt cmd]
   "Writes a line directly to mbt socket"
-  (when (:writer mbt)
-    (.println (:writer mbt) cmd))
+  (.println (:writer mbt) cmd)
+  (println "mbt-write: " cmd)
   mbt)
 
 (defn mbt-parse [mbt head data]
-    (let [data  (rekey data mbt-quote-fields)
-          qtype ({"1" :level1} head)
-          cbkey [(data :symbol) qtype]]
-      (if-let [callback (get-in mbt [:subscriptions cbkey])] 
-          (callback data)
-          mbt)))
+    (let [data     (rekey data mbt-quote-fields)
+          qtype    ({"1" :level1} head)
+          cbkey    [(data :symbol) qtype]
+          callback (get-in mbt [:subscriptions cbkey])]
+      (when callback
+        (callback data))
+      mbt))
 
 (def mbt-msg-handlers
   {"G" (fn [mbt head data] (assoc mbt :status :alive))
@@ -130,7 +118,7 @@
           mbt (assoc session :socket socket
                              :reader (mk-reader socket)
                              :writer (mk-writer socket))]
-      (-> mbt mbt-login mbt-read))))
+      mbt)))
 
 (defn mbt-ping [mbt] (mbt-write mbt "9"))
 
@@ -142,5 +130,10 @@
  
 (defn mbt-close [mbt]
   "Closes an MBTrading connection"
-  (.close (:socket mbt))
-  (assoc mbt :socket nil))
+  (when (and mbt (mbt-open? mbt))
+    (.close (:socket mbt))
+    (assoc mbt :socket nil)))
+
+;(def mysock (mbt-connect {:host "127.0.0.1" :port 5020 :username "a" :password "b"}))
+;(mbt-close mysock)
+
