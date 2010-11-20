@@ -9,16 +9,19 @@
 ;; MBT low-level interface
 
 (declare mbt-open)  
+(declare mbt-open?)
 (declare mbt-login) 
 (declare mbt-write)  
 (declare mbt-read)
 (declare mbt-parse)
-(declare mbt-open?)
 (declare mbt-close)
 
 ;; Higher-level, lazy seq-based interface using agents
 
 (declare mbt!)          ;; connect to MB trading & login
+(declare status?)       ;; returns status of connection: :alive, :login-accept, :login-deny, :dead
+                        ;;    if there are any errors, return that too
+(declare alive?)        ;; shortcut to just find out if the connection is fully alive
 (declare disconnect!)   ;; disconnect from MB trading
 (declare subscribe!)    ;; subscribe to a quote stream
 (declare unsubscribe!)  ;; unsubscribe from quote stream
@@ -74,7 +77,6 @@
    :option-chain 20004})
 
 ;; Low-level interface 
-
 (defn- get-mbt-session [user pass]
   "Obtain quote server session information from MBT login server & 
    connect socket"
@@ -89,7 +91,7 @@
 
 (defn mbt-open
   "Connect to MBTrading, return open session"
-  ([user pass] (mbt-connect (get-mbt-session user pass)))
+  ([user pass] (mbt-open (get-mbt-session user pass)))
   ([session]
     (let [socket (mk-socket (:host session) (:port session))
           mbt (assoc session :socket socket
@@ -112,7 +114,7 @@
 
 (defn mbt-read [mbt]
   "Reads a line from socket"
-  (.readLine (:reader mbt) cmd))
+  (.readLine (:reader mbt)))
 
 (defn mbt-write [mbt cmd]
   "Writes a line directly to mbt socket"
@@ -123,9 +125,9 @@
           A|B=1;C=2 into [A {B 1 C 2}]
           A         into [A nil]"
     :test }
-  (let [head (-> s first trim)
-        body (when (> (count s) 2) 
-                   (-> (split s #"\|") trim second))
+  (let [head (-> line first trim)
+        body (when (> (count line) 2) 
+                   (-> (split line #"\|") trim second))
         msg-type (or (mbt-in-type head) head)
         data (when body  
                (apply hash-map 
@@ -141,33 +143,65 @@
 
 (defn mbt-ping [mbt] (mbt-write mbt "9"))
 
-(defn mbt-subscribe [mbt symb qtype callback]
-  "Subscribe to quotes"
-  (-> (mbt-write mbt (str "S|" "1003=" symb ";"
-                               "2000=" (mbt-quote-types qtype)))
-      (assoc-in [:subscriptions [symb qtype]] callback)))
-
-
 ;; High-level interface
-
-
-(declare mbt!)          ;; connect to MB trading & login
-(declare disconnect!)   ;; disconnect from MB trading
-(declare subscribe!)    ;; subscribe to a quote stream
-(declare unsubscribe!)  ;; unsubscribe from quote stream
-(declare fundamental?)  ;; request fundamentals info - synchronous
-(declare ping!)         ;; ping the server - synchronous, returns ping time (takes optional timeout)
-(declare quotes)        ;; lazy seq of incoming quotes
 
 (def *mbt* nil)
 
 (defn mbt! [user pass]
-    (let  [conn (-> (mbt-connect) 
+    (let  [conn (-> (mbt-open) 
                     (mbt-login user pass))
           [reply body] (-> (mbt-read conn)
                            (mbt-parse))]
       (when (= reply :login-accept)
           (def *mbt* (-> conn (assoc :status :alive)
                                agent))
-          (:status @mbt))))
+          (:status @*mbt*))))
+
+(defn disconnect! []
+  "Disconnects from MB Trading."
+  (send *mbt* mbt-close)
+  (await *mbt*)
+  (:status @*mbt*))
+
+(defn subscribe! [subs-type symbol]
+  "Subscribe to quotes"
+  (send-off *mbt*
+    (mbt-write (str "S|" "1003=" symbol ";"
+                         "2000=" (mbt-subs-type subs-type)))))
+
+(defn unsubscribe! [subs-type symbol]
+  "Unsubscribe from quotes"
+  (send-off *mbt*
+      (mbt-write (str "U|" "1003=" symbol ";"
+                           "2000=" (mbt-subs-type subs-type)))))
+
+(defn fundamental? [symbol]
+  "Request fundamental data"
+  (send-off *mbt*
+      (mbt-write (str "H|" "1003=" symbol ";"))))
+
+(defn ping! []
+  "Send ping message"
+  (send-off *mbt* mbt-ping))
+
+(defn quotes []
+  "Read quotes as a lazy sequence"
+  (map mbt-parse (line-seq (:reader @*mbt*))))
+
+(defn status? []
+  "Checks status of MB Trading connection:
+    :open
+    :login-accept
+    :login-deny
+    :alive
+    :dead
+    or an exception from the agent"
+  (cond 
+    ((agent-error *mbt*) (agent-error *mbt*))
+    ((mbt-open? @*mbt*) (:status @*mbt*))
+    :otherwise :dead))
+
+(defn alive? []
+  "Shortcut to check the connection is alive"
+  (= :alive (status?)))
 
