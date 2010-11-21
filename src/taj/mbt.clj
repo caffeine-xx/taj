@@ -26,7 +26,7 @@
 (declare unsubscribe!)  ;; unsubscribe from quote stream
 (declare fundamental?)  ;; request fundamentals info - synchronous
 (declare ping!)         ;; ping the server - synchronous, returns ping time (takes optional timeout)
-(declare quotes)        ;; lazy seq of incoming quotes
+(declare stream)        ;; lazy seq of incoming messages
 
 ;; Utilities
 
@@ -37,9 +37,11 @@
 (defn rekey [h m]
   "Transforms the keys of a hashmap into new set of keys,
    {:k v} => {(or (m :k) :k) v}
-   Leaves keys not in m intact."
-  (let [ks (keys h)]
-    (zipmap (map #(or (m %) %) ks) (map h ks))))
+   Leaves keys not in m intact.
+   Returns nil when h is nil"
+  (when h
+    (let [ks (keys h)]
+    (zipmap (map #(or (m %) %) ks) (map h ks)))))
 
 ;; MBT fields
 
@@ -85,8 +87,9 @@
   (let [url     (str "https://www.mbtrading.com/secure/getquoteserverxml.asp?"
                      "username="  user "&password=" pass)
         tree    (parse url)
-        session (get-in tree [:content 0 :attrs])]
-    [(:qs_Server session) 5020]))
+        host (get-in tree [:content 0 :attrs :quote_Server])]
+    (print tree)
+    [host 5020]))
 
 (defn mbt-open [user pass host port]
   "Connect to MBTrading, return open session"
@@ -104,11 +107,14 @@
 
 (defn mbt-read [mbt]
   "Reads a line from socket"
-  (.readLine (:reader mbt)))
+  (println "mbt-read: " mbt)
+  (when mbt
+    (.readLine (:reader mbt))))
 
 (defn mbt-write [mbt cmd]
   "Writes a line directly to mbt socket"
-  (.println (:writer mbt) cmd))
+  (.println (:writer mbt) cmd)
+  mbt)
 
 (defn mbt-parse [line]
   ^{:doc "Splits a string 
@@ -116,17 +122,14 @@
           A         into [A nil]"
     :test }
   (let [head (-> line (nth 0) str trim)
-        x    (println head)
         body (when (> (count line) 2) 
-                   (-> (split line #"\|") trim second))
-        y    (println body)
+                   (-> (split line #"\|") second trim))
         msg-type (or (mbt-in-type head) head)
-        z    (println msg-type)
         data (when body  
                (apply hash-map 
                  (vec (apply concat 
                         (map #(split % #"=") (split body #";"))))))]
-    [msg-type data]))
+    [msg-type (rekey data mbt-in-field)]))
 
 (defn mbt-close [mbt]
   "Closes an MBTrading connection"
@@ -144,43 +147,48 @@
     (let  [[host port] (or server (get-mbt-session user pass))
            conn (-> (mbt-open user pass host port) 
                     (mbt-write (str "L|" "100=" user ";" "101=" pass "")))
+           x (println conn)
           [reply body] (-> (mbt-read conn)
                            (mbt-parse))]
-      (when (= reply :login-accept)
-          (def *mbt* (-> conn (assoc :status :alive)
-                               agent))
-          (:status @*mbt*))))
+      (case reply 
+        :login-accept  (def *mbt* (-> conn (assoc :status :alive)
+                                           agent))
+        :login-deny    (def *mbt* (-> conn (assoc :status :dead)
+                                           agent)))
+        (:status @*mbt*)))
 
 (defn disconnect! []
   "Disconnects from MB Trading."
   (send *mbt* mbt-close)
+  (send *mbt* assoc :status :closed)
   (await *mbt*)
   (:status @*mbt*))
 
 (defn subscribe! [subs-type symbol]
   "Subscribe to quotes"
   (send-off *mbt*
-    (mbt-write (str "S|" "1003=" symbol ";"
-                         "2000=" (mbt-subs-type subs-type)))))
+    mbt-write (str "S|" "1003=" symbol ";"
+                         "2000=" (mbt-subs-type subs-type))))
 
 (defn unsubscribe! [subs-type symbol]
   "Unsubscribe from quotes"
   (send-off *mbt*
-      (mbt-write (str "U|" "1003=" symbol ";"
-                           "2000=" (mbt-subs-type subs-type)))))
+    mbt-write (str "U|" "1003=" symbol ";"
+                        "2000=" (mbt-subs-type subs-type))))
 
 (defn fundamental? [symbol]
   "Request fundamental data"
   (send-off *mbt*
-      (mbt-write (str "H|" "1003=" symbol ";"))))
+    mbt-write (str "H|" "1003=" symbol ";")))
 
 (defn ping! []
   "Send ping message"
-  (send-off *mbt* (mbt-write "9")))
+  (send-off *mbt* mbt-write "9"))
 
-(defn quotes []
+(defn stream []
   "Read quotes as a lazy sequence"
-  (map mbt-parse (line-seq (:reader @*mbt*))))
+  (when (:reader @*mbt*)
+    (map mbt-parse (line-seq (:reader @*mbt*)))))
 
 (defn status? []
   "Checks status of MB Trading connection:

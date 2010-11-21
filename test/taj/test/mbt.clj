@@ -7,33 +7,29 @@
 ;;; utilities
 
 (def conn (promise))  ; mock qs server
-(def ss   nil) 
 (def mbt  (atom nil)) ; session
 
 (def conn-data
-  #{:user "tu"
-    :pass "tp"
-    :host "127.0.0.1"
-    :port  5020})
+  (array-map  :user "tu"
+              :pass "tp"
+              :host "127.0.0.1"
+              :port  5020))
 
-(defn mk-server [done?]
+(defn mk-server [f]
   "Creates a server socket, and promises a connection"
+  (println "mk-server: " f)
   (def conn (promise))
-  (letfn [(runf [in out] 
-            (deliver conn {:in (mk-reader in) :out (mk-writer out)})
-            (println "done:" (deref done?)))]
-    (def ss (create-server (:port conn-data) runf))))
-
-(defn mk-mbt-conn [f]
-  (let [done? (promise)]
-    (mk-server done?)
-    (reset! mbt (apply mbt-open (vals conn-data)))
-    (f)
-    (swap! mbt mbt-close)
-    (deliver done? true)
-    (close-server ss)
-    (Thread/sleep 0.2) ;dodgy
-    (deref done?)))    ;hack.
+  (let [done? (promise)
+        cf    (fn [in out]
+                (println "connection open.")
+                (deliver conn {:in (mk-reader in) :out (mk-writer out)})
+                (println "connection done:" (deref done?)))
+        ss    (create-server (:port conn-data) cf)]
+    (try (f)
+         (Thread/sleep 0.5)
+      (finally 
+        (deliver done? true)
+        (close-server ss)))))
 
 (defn sock-read []
   (println "sock-read conn: " (:in @conn))
@@ -61,62 +57,61 @@
   (is (= (mbt-parse "A") ["A" nil])))
 
 (deftest test-open 
-  (println "test-connect")
-  (mk-mbt-conn 
-    (fn [] (is (mbt-open? @mbt) "Socket connected"))))
+  (println "test-open")
+  (reset! mbt (apply mbt-open (vals conn-data)))
+  (is (mbt-open? @mbt) "Socket connected"))
 
 (deftest test-read
   (println "test-read")
-  (mk-mbt-conn 
-    #((sock-write "test data")
-      (is (= "test data" (mbt-read @mbt))))))
+  (test-open)
+  (sock-write "test data")
+  (is (= "test data" (mbt-read @mbt))))
 
 (deftest test-write
   (println "test-write")
-  (mk-mbt-conn 
-    #((swap! mbt mbt-write "test data")
-      (is (= "test data" (sock-read))))))
+  (test-open)
+  (mbt-write @mbt "test data")
+  (is (= "test data" (sock-read))))
 
-;; (deftest test-login-success
-;;   (println "test-login-success")
-;;   (mk-mbt-conn
-;;     (fn [] 
-;;       (swap! mbt mbt-login)
-;;       (is (= "L|100=tu;101=tp" (sock-read)) "Login message")
-;;       (sock-write "G|100=tu") 
-;;       (swap! mbt mbt-read)
-;;       (is (= :alive (:status @mbt)) "Good Login"))))
-;; 
-;; (deftest test-login-denied
-;;   (println "test-login-denied")
-;;   (mk-mbt-conn
-;;     (fn [] 
-;;       (swap! mbt mbt-login)
-;;       (is (= "L|100=tu;101=tp" (sock-read)) "Login message")
-;;       (sock-write "D|100=tu;103=Failz") 
-;;       (swap! mbt mbt-read)
-;;       (is (= :denied (:status @mbt)) "Login denied"))))
-;; 
-;; (deftest test-subscribe
-;;   (println "test-subscribe")
-;;   (mk-mbt-conn
-;;     (fn [] 
-;;       (let [recv? (promise)]
-;;         (swap! mbt 
-;;                mbt-subscribe "C" :level1 
-;;                             (fn [data] 
-;;                               (is (= {:symbol "C" :price "1.5"} data) "Quote parsed properly")
-;;                               (deliver recv? true)))
-;;         (is (= "S|1003=C;2000=20000" (sock-read)) "Correct subscription message")
-;;         (sock-write "1|1003=C;2002=1.5")
-;;         (swap! mbt mbt-read)
-;;         (is (= @recv? true) "Callback actually got called")))))
+(deftest test-close
+  (println "test-close")
+  (test-open)
+  (swap! mbt mbt-close)
+  (is (not (mbt-open? @mbt))))
+
+;; test high-level api
+
+(deftest test-login 
+  (let [status (future (apply mbt! (vals conn-data)))]
+    (is (= "L|100=tu;101=tp" (sock-read)))
+    (sock-write "G|100=tu")
+    (is (= :alive @status))))
+
+(deftest test-login-fail
+  (let [status (future (apply mbt! (vals conn-data)))]
+    (is (= "L|100=tu;101=tp" (sock-read)))
+    (sock-write "D|100=tu")
+    (is (= :dead @status))))
+
+(deftest test-subscribe
+  (test-login)
+  (subscribe! :level1 "C")
+  (is (= "S|1003=C;2000=20000" (sock-read)) "Subscription message"))
+
+(deftest test-unsubscribe
+  (test-login)
+  (unsubscribe! :level1 "C")
+  (is (= "U|1003=C;2000=20000" (sock-read)) "Unsubscribe message"))
 
 (defn test-ns-hook []
   (test-parse)
-;;  (test-mbt-ping)
-;;  (test-connect)
-;;  (test-login-success)
-;;  (test-login-denied)
-;;  (test-subscribe)
-  )
+  (mk-server test-open)
+  (mk-server test-read)
+  (mk-server test-write)
+  (mk-server test-close)
+  (mk-server test-login)
+  (mk-server test-login-fail)
+  (mk-server test-subscribe)
+  (mk-server test-unsubscribe)
+)
+
