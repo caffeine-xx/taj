@@ -10,7 +10,6 @@
 
 (declare mbt-open)  
 (declare mbt-open?)
-(declare mbt-login) 
 (declare mbt-write)  
 (declare mbt-read)
 (declare mbt-parse)
@@ -55,12 +54,15 @@
    "9" :ping})
 
 (def mbt-in-field
-  {"1003"  :symbol
+  {"100"   :username
+   "103"   :login-reason
+   "1003"  :symbol
    "2002"  :price
    "2003"  :bid
    "2004"  :ask
    "2014"  :timestamp
-   "2015"  :date})
+   "2015"  :date
+   "8055"  :msg-from})
 
 (def mbt-out-type
   {:login       "L"
@@ -84,33 +86,21 @@
                      "username="  user "&password=" pass)
         tree    (parse url)
         session (get-in tree [:content 0 :attrs])]
-    {:username user
-     :password pass
-     :host     (:qs_Server session)}
-     :port     5020))
+    [(:qs_Server session) 5020]))
 
-(defn mbt-open
+(defn mbt-open [user pass host port]
   "Connect to MBTrading, return open session"
-  ([user pass] (mbt-open (get-mbt-session user pass)))
-  ([session]
-    (let [socket (mk-socket (:host session) (:port session))
-          mbt (assoc session :socket socket
-                             :reader (mk-reader socket)
-                             :writer (mk-writer socket))]
-      mbt)))
+    (let [socket (mk-socket host port)
+          mbt { :socket socket
+                :reader (mk-reader socket)
+                :writer (mk-writer socket)
+                :host host :port  port
+                :user user :pass  pass}]
+      mbt))
 
 (defn mbt-open? [mbt]
   "Returns true if mbt socket is open"
   (socket-open? (:socket mbt)))
-
-(defn mbt-login 
-  ([mbt user pass]
-    "Login to Quotes API"
-    (mbt-write mbt (str "L|" "100=" user ";"
-                             "101=" pass "")))
-  ([mbt]
-   "Login to Quotes API using session info"
-   (mbt-login (:username mbt) (:password mbt))))
 
 (defn mbt-read [mbt]
   "Reads a line from socket"
@@ -125,10 +115,13 @@
           A|B=1;C=2 into [A {B 1 C 2}]
           A         into [A nil]"
     :test }
-  (let [head (-> line first trim)
+  (let [head (-> line (nth 0) str trim)
+        x    (println head)
         body (when (> (count line) 2) 
                    (-> (split line #"\|") trim second))
+        y    (println body)
         msg-type (or (mbt-in-type head) head)
+        z    (println msg-type)
         data (when body  
                (apply hash-map 
                  (vec (apply concat 
@@ -147,9 +140,10 @@
 
 (def *mbt* nil)
 
-(defn mbt! [user pass]
-    (let  [conn (-> (mbt-open) 
-                    (mbt-login user pass))
+(defn mbt! [user pass & server]
+    (let  [[host port] (or server (get-mbt-session user pass))
+           conn (-> (mbt-open user pass host port) 
+                    (mbt-write (str "L|" "100=" user ";" "101=" pass "")))
           [reply body] (-> (mbt-read conn)
                            (mbt-parse))]
       (when (= reply :login-accept)
@@ -182,7 +176,7 @@
 
 (defn ping! []
   "Send ping message"
-  (send-off *mbt* mbt-ping))
+  (send-off *mbt* (mbt-write "9")))
 
 (defn quotes []
   "Read quotes as a lazy sequence"
@@ -203,5 +197,5 @@
 
 (defn alive? []
   "Shortcut to check the connection is alive"
-  (= :alive (status?)))
+  (and (mbt-open? @*mbt*) (= (:status @*mbt*) :alive)))
 
