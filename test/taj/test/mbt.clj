@@ -17,29 +17,26 @@
 
 (defn mk-server [f]
   "Creates a server socket, and promises a connection"
-  (println "mk-server: " f)
   (def conn (promise))
   (let [done? (promise)
         cf    (fn [in out]
-                (println "connection open.")
                 (deliver conn {:in (mk-reader in) :out (mk-writer out)})
-                (println "connection done:" (deref done?)))
+                (deref done?))
         ss    (create-server (:port conn-data) cf)]
-    (try (f)
-         (Thread/sleep 0.5)
+    (try 
+         (f)
+         (Thread/sleep 0.1)
       (finally 
         (deliver done? true)
+        (Thread/sleep 0.2)
         (close-server ss)))))
 
 (defn sock-read []
-  (println "sock-read conn: " (:in @conn))
   (let [s (.readLine (:in @conn))]
-    (println "sock-read:" s)
     s))
 
 (defn sock-write [s]
-  (.println (:out @conn) s)
-  (println "sock-write:" s))
+  (.println (:out @conn) s))
 
 ;;; test utilities
 
@@ -57,24 +54,20 @@
   (is (= (mbt-parse "A") ["A" nil])))
 
 (deftest test-open 
-  (println "test-open")
   (reset! mbt (apply mbt-open (vals conn-data)))
   (is (mbt-open? @mbt) "Socket connected"))
 
 (deftest test-read
-  (println "test-read")
   (test-open)
   (sock-write "test data")
   (is (= "test data" (mbt-read @mbt))))
 
 (deftest test-write
-  (println "test-write")
   (test-open)
   (mbt-write @mbt "test data")
   (is (= "test data" (sock-read))))
 
 (deftest test-close
-  (println "test-close")
   (test-open)
   (swap! mbt mbt-close)
   (is (not (mbt-open? @mbt))))
@@ -112,6 +105,5 @@
   (mk-server test-login)
   (mk-server test-login-fail)
   (mk-server test-subscribe)
-  (mk-server test-unsubscribe)
-)
+  (mk-server test-unsubscribe))
 
