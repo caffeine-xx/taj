@@ -1,4 +1,7 @@
-(ns taj.gp)
+(ns taj.gp
+  ^{:author "Daniel Cook"
+    :doc "Gaussian process regression"}
+  (:use (incanter core stats)))
 
 (defn- elem-prod [x1 x2]
   (map * x1 x2))
@@ -11,4 +14,3 @@
    (vec (for [x1 xs] 
           (vec (for [x2 xs] 
                  (dot-kernel x1 x2)))))))
-

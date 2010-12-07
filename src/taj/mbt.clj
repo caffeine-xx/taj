@@ -6,7 +6,7 @@
   (:use [clojure.string  :only [split trim]])
   (:import java.net.Socket))
 
-;; MBT low-level interface
+;; MBT low-level socket interface
 
 (declare mbt-open)  
 (declare mbt-open?)
@@ -45,40 +45,85 @@
 
 ;; MBT fields
 
-(def mbt-in-type
+(def mbt-incoming-headers
   {"G" :login-accept
-   "D" :login-deny
+   "D" :login-deny 
    "1" :level1
-   "2" :level2
-   "3" :trade
+   "2" :level2 
+   "3" :trade  
    "N" :fundamental
-   "4" :option-chain
+   "4" :option-chain 
    "9" :ping})
 
-(def mbt-in-field
-  {"100"   :username
-   "103"   :login-reason
-   "1003"  :symbol
-   "2002"  :price
-   "2003"  :bid
-   "2004"  :ask
-   "2014"  :timestamp
-   "2015"  :date
-   "8055"  :msg-from})
-
-(def mbt-out-type
+(def mbt-outgoing-headers
   {:login       "L"
    :subscribe   "S"
    :unsubscribe "U"
    :fundamenal  "H"
    :ping        "9"})
 
-(def mbt-subs-type
-  {:level1       20000
-   :level2       20001
-   :level12      20002
-   :trade        20003
-   :option-chain 20004})
+(def mbt-incoming-fields
+  { :login-accept #{:username :msg-from}
+    :login-deny   #{:username :login-reason}
+    :level1       #{:symbol   :tick
+                    :price    :timestamp
+                    :bid      :date
+                    :ask      :exchange
+                    :bid-size :strike
+                    :ask-size :contract-size
+                    :size     :put-call
+                    :close    :exp-month
+                    :high     :exp-year
+                    :low      :open-interest
+                    :volume}
+    :level2        (fn [_] true) ;; TODO specify fields
+    :trade         (fn [_] true)
+    :fundamental   (fn [_] true)
+    :option-chain  (fn [_] true)
+    :ping          #{} })
+
+(def mbt-outgoing-fields
+  { :login        #{:username :password}
+    :subscribe    #{:symbol   :subs-type}
+    :unsubscribe  #{:symbol   :subs-type}
+    :fundamental  #{:symbol}
+    :ping         #{} })
+
+(def mbt-fields
+  {"100"   :username
+   "103"   :login-reason
+   "1003"  :symbol
+   "2000"  :subs-type 
+   "2002"  :price
+   "2003"  :bid
+   "2004"  :ask
+   "2005"  :bid-size
+   "2006"  :ask-size
+   "2007"  :size
+   "2008"  :close
+   "2009"  :high
+   "2010"  :low
+   "2012"  :volume
+   "2013"  :tick  
+   "2014"  :timestamp
+   "2015"  :date
+   "2042"  :exchange
+   "2035"  :strike
+   "2041"  :contract-size
+   "2038"  :put-call
+   "2036"  :exp-month
+   "2040"  :exp-year
+   "2037"  :open-interest
+   "8055"  :msg-from})
+
+(def mbt-field-values
+  {:subs-type {:level1        "20000"
+               :level2        "20001"
+               :level12       "20002"
+               :trade         "20003"
+               :option-chain  "20004"}
+   :tick      {:uptick        "20020" 
+               :downtick      "20021"}})
 
 ;; Low-level interface 
 (defn- get-mbt-session [user pass]
@@ -88,7 +133,6 @@
                      "username="  user "&password=" pass)
         tree    (parse url)
         host (get-in tree [:content 0 :attrs :quote_Server])]
-    (print tree)
     [host 5020]))
 
 (defn mbt-open [user pass host port]
@@ -107,37 +151,40 @@
 
 (defn mbt-read [mbt]
   "Reads a line from socket"
-  (println "mbt-read: " mbt)
-  (when mbt
-    (.readLine (:reader mbt))))
+  (.readLine (:reader mbt)))
 
 (defn mbt-write [mbt cmd]
   "Writes a line directly to mbt socket"
   (.println (:writer mbt) cmd)
   mbt)
 
-(defn mbt-parse [line]
-  ^{:doc "Splits a string 
+(defn mbt-split [line]
+  ^{:doc "Splits a string into a data structure
           A|B=1;C=2 into [A {B 1 C 2}]
-          A         into [A nil]"
-    :test }
+          A         into [A nil]"}
   (let [head (-> line (nth 0) str trim)
         body (when (> (count line) 2) 
                    (-> (split line #"\|") second trim))
-        msg-type (or (mbt-in-type head) head)
         data (when body  
                (apply hash-map 
                  (vec (apply concat 
                         (map #(split % #"=") (split body #";"))))))]
-    [msg-type (rekey data mbt-in-field)]))
+    [head data]))
+
+(defn mbt-parse [line]
+  ^{:doc "Parses a line A|B=1;C=2 into a message"}
+  (let [[head data] (mbt-split line) 
+        msg-type (or (mbt-incoming-headers head) head)
+        msg-data (rekey data mbt-fields)]
+    [msg-type msg-data]))
 
 (defn mbt-close [mbt]
   "Closes an MBTrading connection"
-  (when (and mbt (mbt-open? mbt))
-    (.close (:socket mbt))
-    (assoc mbt :socket nil)))
+  (.close (:socket mbt))
+  (assoc mbt :socket nil))
 
-(defn mbt-ping [mbt] (mbt-write mbt "9"))
+(defn mbt-ping [mbt] 
+  (mbt-write mbt "9"))
 
 ;; High-level interface
 
@@ -147,14 +194,11 @@
     (let  [[host port] (or server (get-mbt-session user pass))
            conn (-> (mbt-open user pass host port) 
                     (mbt-write (str "L|" "100=" user ";" "101=" pass "")))
-           x (println conn)
           [reply body] (-> (mbt-read conn)
                            (mbt-parse))]
       (case reply 
-        :login-accept  (def *mbt* (-> conn (assoc :status :alive)
-                                           agent))
-        :login-deny    (def *mbt* (-> conn (assoc :status :dead)
-                                           agent)))
+        :login-accept  (def *mbt* (-> conn (assoc :status :alive) agent))
+        :login-deny    (def *mbt* (-> conn (assoc :status :dead)  agent)))
         (:status @*mbt*)))
 
 (defn disconnect! []
@@ -168,13 +212,13 @@
   "Subscribe to quotes"
   (send-off *mbt*
     mbt-write (str "S|" "1003=" symbol ";"
-                         "2000=" (mbt-subs-type subs-type))))
+                        "2000=" (get-in mbt-field-values [:subs-type subs-type]))))
 
 (defn unsubscribe! [subs-type symbol]
   "Unsubscribe from quotes"
   (send-off *mbt*
     mbt-write (str "U|" "1003=" symbol ";"
-                        "2000=" (mbt-subs-type subs-type))))
+                        "2000=" (get-in mbt-field-values [:subs-type subs-type]))))
 
 (defn fundamental? [symbol]
   "Request fundamental data"
