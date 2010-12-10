@@ -18,6 +18,11 @@
 
 (def tol 0.01)
 
+(deftest test-sum-squared-dist
+  (let [xm (m/column-matrix x0)
+        XM (m/matrix X)]
+  (is (= [[0 2 8]] (vec (m/from-matrix (sum-squared-dist xm XM)))))))
+
 (defn- is-within [err x0 x1]
   (is (< (Math/abs (- x0 x1)) err)))
 
@@ -25,7 +30,8 @@
   (is (= x0-dot-x1 (dot-kernel [x0] [x1]))))
 
 (deftest test-gauss-kernel
-  (is-within tol 0.1468 (el (gauss-kernel [x0] [x1]))))
+  (is-within tol 0.367 (el (gauss-kernel [x0] [x1]))))
+
 
 (deftest test-kernel-row
   (is (= (vec (m/from-matrix 
@@ -47,15 +53,13 @@
         hp (h pt)]
     (is-within tol (f pt) (h pt))))
 
-(comment
 (deftest test-gp-sin
-  (let [npts 200
-        f (fn [[x]] (Math/sin (* 0.5 3.14159 (/ x npts))))
+  (let [npts 300
+        f (fn [[x]] (Math/sin (* 4 3.14159 (/ x npts))))
         X (vec (map #(into [] [(double %)]) (range npts)))
         y (map f X)
-        h (gp gauss-kernel X y 0.2)
-        pt [50]
-        hp (h pt)
-        fp (f pt)]
-    (println pt hp fp)
-    (is-within tol hp fp))))
+        h (gp gauss-kernel X y 1)
+        hp (map h X)
+        hc (map #(h % %) X)]
+    ;(println (m/trans (m/matrix [y hp hc])))
+    ))
