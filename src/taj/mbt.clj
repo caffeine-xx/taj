@@ -4,18 +4,11 @@
   (:use [clojure.java.io :only [as-url reader writer]])
   (:use [clojure.xml     :only [parse]])
   (:use [clojure.string  :only [split trim]])
-  (:import java.net.Socket))
+  (:use [clojure.set     :only [map-invert]])
+  (:require [clj-time coerce format])
+  (:import (java.net Socket)))
 
-;; MBT low-level socket interface
-
-(declare mbt-open)  
-(declare mbt-open?)
-(declare mbt-write)  
-(declare mbt-read)
-(declare mbt-parse)
-(declare mbt-close)
-
-;; Higher-level, lazy seq-based interface using agents
+(def *mbt* nil)         ;; connection
 
 (declare mbt!)          ;; connect to MB trading & login
 (declare status?)       ;; returns status of connection: :alive, :login-accept, :login-deny, :dead
@@ -30,7 +23,7 @@
 
 ;; Utilities
 
-(defn mk-socket [host port] (java.net.Socket. host port))
+(defn mk-socket [host port] (Socket. host port))
 (defn mk-writer [sock] (java.io.PrintWriter. (writer sock) true))
 (defn mk-reader [sock] (reader sock))
 (defn socket-open? [socket] (when socket (not (.isClosed socket))))
@@ -42,9 +35,6 @@
   (when h
     (let [ks (keys h)]
     (zipmap (map #(or (m %) %) ks) (map h ks)))))
-
-;; MBT fields
-
 (def mbt-incoming-headers
   {"G" :login-accept
    "D" :login-deny 
@@ -103,9 +93,10 @@
    "2008"  :close
    "2009"  :high
    "2010"  :low
+   "2011"  :open
    "2012"  :volume
    "2013"  :tick  
-   "2014"  :timestamp
+   "2014"  :time
    "2015"  :date
    "2042"  :exchange
    "2035"  :strike
@@ -116,14 +107,34 @@
    "2037"  :open-interest
    "8055"  :msg-from})
 
-(def mbt-field-values
-  {:subs-type {:level1        "20000"
-               :level2        "20001"
-               :level12       "20002"
-               :trade         "20003"
-               :option-chain  "20004"}
-   :tick      {:uptick        "20020" 
-               :downtick      "20021"}})
+(def mbt-enums
+  {:level1        "20000"
+   :level2        "20001"
+   :level12       "20002"
+   :trade         "20003"
+   :option-chain  "20004"
+   :uptick        "20020" 
+   :downtick      "20021"})
+
+(def mbt-enums-inv (map-invert mbt-enums))
+
+(defn parse-integer [s]
+  (try (Integer/parseInt (trim s)) 
+       (catch NumberFormatException nfe 0)))
+
+(defn parse-double [s]
+  (try (Double/parseDouble (trim s)) 
+       (catch NumberFormatException nfe 0.0)))
+
+(defn parse-date [s]
+  (let [s  (trim s)
+        d  (clj-time.coerce/from-string s)
+        d  (or d (clj-time.format/parse 
+                    (clj-time.format/formatter  "MM/dd/yyyy") s))]
+    (when d (clj-time.coerce/to-long d))))
+
+(defn parse-enum [s]
+  (or (mbt-enums-inv (trim s)) s))
 
 ;; Low-level interface 
 (defn- get-mbt-session [user pass]
@@ -158,25 +169,42 @@
   (.println (:writer mbt) cmd)
   mbt)
 
-(defn mbt-split [line]
+(defn- mbt-split [line]
   ^{:doc "Splits a string into a data structure
           A|B=1;C=2 into [A {B 1 C 2}]
-          A         into [A nil]"}
+          A         into [A nil], 
+         sub routine for mbt-parse"}
   (let [head (-> line (nth 0) str trim)
         body (when (> (count line) 2) 
-                   (-> (split line #"\|") second trim))
+                  (-> (split line #"\|") second trim))
         data (when body  
-               (apply hash-map 
-                 (vec (apply concat 
-                        (map #(split % #"=") (split body #";"))))))]
+              (apply hash-map 
+                (vec (apply concat 
+                            (map #(split % #"=") (split body #";"))))))]
     [head data]))
+
+(defn parse-fields [msg]
+  (let [to-double (filter msg 
+                          [:price  :bid   :ask  :bid-size :ask-size 
+                           :size   :close :high :low :open :volume
+                           :strike :contract-size :open-interest])
+        to-date   (filter msg 
+                          [:time :date])
+        to-enum   (filter msg
+                          [:subs-type :tick])
+        fmap (fn [m ks f]
+                 (merge m (zipmap ks (map (comp f m) ks))))]
+    (-> msg (fmap to-double parse-double)
+            (fmap to-date   parse-date)
+            (fmap to-enum   parse-enum))))
 
 (defn mbt-parse [line]
   ^{:doc "Parses a line A|B=1;C=2 into a message"}
-  (let [[head data] (mbt-split line) 
-        msg-type (or (mbt-incoming-headers head) head)
-        msg-data (rekey data mbt-fields)]
-    [msg-type msg-data]))
+  (when (> (count (trim line)) 0)
+    (let [[head data] (mbt-split line) 
+          msg-type (or (mbt-incoming-headers head) head)
+          msg-data (assoc (rekey data mbt-fields) :msg-type msg-type)]
+      (parse-fields msg-data))))
 
 (defn mbt-close [mbt]
   "Closes an MBTrading connection"
@@ -188,14 +216,13 @@
 
 ;; High-level interface
 
-(def *mbt* nil)
-
 (defn mbt! [user pass & server]
     (let  [[host port] (or server (get-mbt-session user pass))
            conn (-> (mbt-open user pass host port) 
                     (mbt-write (str "L|" "100=" user ";" "101=" pass "")))
-          [reply body] (-> (mbt-read conn)
-                           (mbt-parse))]
+           reply (-> (mbt-read conn)
+                     (mbt-parse) 
+                     (:msg-type))]
       (case reply 
         :login-accept  (def *mbt* (-> conn (assoc :status :alive) agent))
         :login-deny    (def *mbt* (-> conn (assoc :status :dead)  agent)))
@@ -212,13 +239,13 @@
   "Subscribe to quotes"
   (send-off *mbt*
     mbt-write (str "S|" "1003=" symbol ";"
-                        "2000=" (get-in mbt-field-values [:subs-type subs-type]))))
+                        "2000=" (mbt-enums subs-type))))
 
 (defn unsubscribe! [subs-type symbol]
   "Unsubscribe from quotes"
   (send-off *mbt*
     mbt-write (str "U|" "1003=" symbol ";"
-                        "2000=" (get-in mbt-field-values [:subs-type subs-type]))))
+                        "2000=" (mbt-enums subs-type))))
 
 (defn fundamental? [symbol]
   "Request fundamental data"
@@ -232,7 +259,7 @@
 (defn stream []
   "Read quotes as a lazy sequence"
   (when (:reader @*mbt*)
-    (map mbt-parse (line-seq (:reader @*mbt*)))))
+    (filter (comp not nil?) (map mbt-parse (line-seq (:reader @*mbt*))))))
 
 (defn status? []
   "Checks status of MB Trading connection:
