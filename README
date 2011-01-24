@@ -1,13 +1,26 @@
 # taj
 
-Trading Arbitrage in cloJure ..
+(iteration 0 "the mvp"):
 
-## Usage
+  - quotes to persistent storage
 
-This does not work.  Don't use it.
+  - simple options valuation based on quantlib
+  - trading strategy: long under-priced assets
+  - output trades to FIX
 
-## License
+  - portfolio management (accounting of positions &  orders)
+  - simple web view of current portfolio
 
-Copyright (C) 2010 Dan Cook
+  done:
+  - quote stream integration (mbtrading) 
+  - quote parsing
 
-Distributed under the Eclipse Public License, the same as Clojure.
+(iteration 1 "speed & power")
+
+  - watching multiple symbols
+
+  - portfolio optimization, including transaction costs
+  - second trading strategy: pairs trading
+
+  - benchmarking: message turnaround time < 1 ms 
+
