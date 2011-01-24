@@ -2,18 +2,18 @@
   (:use [taj.mbt] :reload)
   (:use [clojure.test]
         [clojure.contrib.server-socket :only [create-server close-server]])
-  (:require (clojure [string :as string])))
+  (:require (clojure [string :as string]))
+  (:import [java.net.ServerSocket]))
 
 ;;; utilities
 
 (def conn (promise))  ; mock qs server
 (def mbt  (atom nil)) ; session
-
 (def conn-data
   (array-map  :user "tu"
               :pass "tp"
               :host "127.0.0.1"
-              :port  5020))
+              :port  5029))
 
 (defn mk-server [f]
   "Creates a server socket, and promises a connection"
@@ -29,7 +29,12 @@
       (finally 
         (deliver done? true)
         (Thread/sleep 0.2)
-        (close-server ss)))))
+        (try
+          (close-server ss)
+          (catch java.net.SocketException exc
+            (println exc))
+          (finally
+            (.close ^java.net.ServerSocket (:server-socket ss))))))))
 
 (defn sock-read []
   (let [s (.readLine (:in @conn))]
@@ -49,9 +54,13 @@
 ;; test low-level api
 
 (deftest test-parse 
-  (is (= (mbt-parse "G|100=tu;8055=server1\n") [:login-accept {:username "tu" :msg-from "server1"}]))
-  (is (= (mbt-parse "A|B=1;C=2\n") ["A" {"B" "1" "C" "2"}]))
-  (is (= (mbt-parse "A") ["A" nil])))
+  (is (= (mbt-parse "G|100=tu;8055=server1\n")  {:msg-type :login-accept :username "tu" :msg-from "server1"}))
+  (is (= (mbt-parse "A|B=1;C=2\n") {:msg-type "A" "B" "1" "C" "2"}))
+  (is (= (mbt-parse "A") {:msg-type "A"}))
+  (is (= (mbt-parse "\n") nil)))
+
+(deftest test-parsefields
+  (is (=  {:price 205.3, :time 18938000} (parse-fields {:price "205.3" :time "05:15:38"}))))
 
 (deftest test-open 
   (reset! mbt (apply mbt-open (vals conn-data)))
